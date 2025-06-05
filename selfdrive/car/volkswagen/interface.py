@@ -84,12 +84,12 @@ class CarInterface(CarInterfaceBase):
 
     ret.steerLimitTimer = 1.0
     if ret.flags & VolkswagenFlags.PQ or ret.flags & VolkswagenFlags.MLB:
-      ret.steerActuatorDelay = 0.13
+      ret.steerActuatorDelay = 0.2
       ret.steerRatio = 16.0
       ret.mass = 1979.
       ret.wheelbase = 2.8
       ret.centerToFront = ret.wheelbase * 0.46
-      CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
+      ret.steerControlType = car.CarParams.SteerControlType.angle
     else:
       ret.steerActuatorDelay = 0.1
       ret.lateralTuning.pid.kpBP = [0.]
@@ -140,9 +140,6 @@ class CarInterface(CarInterfaceBase):
         events.add(EventName.belowEngageSpeed)
       if c.enabled and ret.vEgo < self.CP.minEnableSpeed:
         events.add(EventName.speedTooLow)
-
-    if self.CC.eps_timer_soft_disable_alert:
-      events.add(EventName.steerTimeLimit)
 
     ret.events = events.to_msg()
 

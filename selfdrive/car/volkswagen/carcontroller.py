@@ -3,7 +3,7 @@ from opendbc.can.packer import CANPacker
 from openpilot.common.numpy_fast import clip
 from openpilot.common.conversions import Conversions as CV
 from openpilot.common.realtime import DT_CTRL
-from openpilot.selfdrive.car import apply_driver_steer_torque_limits
+from openpilot.selfdrive.car import apply_std_steer_angle_limits
 from openpilot.selfdrive.car.interfaces import CarControllerBase
 from openpilot.selfdrive.car.volkswagen import mlbcan, mqbcan, pqcan
 from openpilot.selfdrive.car.volkswagen.values import CANBUS, CarControllerParams, VolkswagenFlags
@@ -26,12 +26,19 @@ class CarController(CarControllerBase):
     else:
       self.CCS = mqbcan
 
-    self.apply_steer_last = 0
+    self.apply_angle_last = 0
     self.gra_acc_counter_last = None
     self.frame = 0
     self.eps_timer_soft_disable_alert = False
     self.hca_frame_timer_running = 0
     self.hca_frame_same_torque = 0
+    self.PLA_status = 0
+    self.PLA_ESP_status = 0
+    self.PLA_entryCounter = 0
+    self.PLA_driverExit = False
+    self.PLA_driverExit_last = False
+    self.CSsteeringAngleDegLast = 0
+    self.CSLH3_SignLast = 0
 
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
@@ -40,38 +47,37 @@ class CarController(CarControllerBase):
 
     # **** Steering Controls ************************************************ #
 
+    if CS.LH2_Abbr == 2 and CS.out.cruiseState.available:
+      self.PLA_driverExit = True
+    else:
+      self.PLA_driverExit = False
+
     if self.frame % self.CCP.STEER_STEP == 0:
-      # Logic to avoid HCA state 4 "refused":
-      #   * Don't steer unless HCA is in state 3 "ready" or 5 "active"
-      #   * Don't steer at standstill
-      #   * Don't send > 3.00 Newton-meters torque
-      #   * Don't send the same torque for > 6 seconds
-      #   * Don't send uninterrupted steering for > 360 seconds
-      # MQB racks reset the uninterrupted steering timer after a single frame
-      # of HCA disabled; this is done whenever output happens to be zero.
-
-      if CC.latActive:
-        new_steer = int(round(actuators.steer * self.CCP.STEER_MAX))
-        apply_steer = apply_driver_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorque, self.CCP)
-        self.hca_frame_timer_running += self.CCP.STEER_STEP
-        if self.apply_steer_last == apply_steer:
-          self.hca_frame_same_torque += self.CCP.STEER_STEP
-          if self.hca_frame_same_torque > self.CCP.STEER_TIME_STUCK_TORQUE / DT_CTRL:
-            apply_steer -= (1, -1)[apply_steer < 0]
-            self.hca_frame_same_torque = 0
-        else:
-          self.hca_frame_same_torque = 0
-        hca_enabled = abs(apply_steer) > 0
+      # PLA_status definitions:
+      #  9 = reset EPS driver torque override flag
+      #  8 = standby
+      #  6 = active
+      #  4 = activatable, entry request signal. 11 frames required
+      if CC.latActive and not self.PLA_driverExit:
+        self.PLA_status = 6 if self.PLA_entryCounter >= 11 else 4
+        self.PLA_ESP_status = 6 if self.PLA_entryCounter >= 32 else 4
+        self.PLA_entryCounter += 1 if self.PLA_entryCounter <= 32 else self.PLA_entryCounter
+        # retry entry until engagement. TODO: add a counter to disable if this takes too long? (error)
+        if CS.LH2_steeringState != 64 and self.PLA_entryCounter >= 30:
+          self.PLA_entryCounter = 0
       else:
-        hca_enabled = False
-        apply_steer = 0
+        self.PLA_status = 9 if self.PLA_driverExit_last and not self.PLA_driverExit else 8  # pulse reset on falling edge
+        self.PLA_ESP_status = 8
+        self.PLA_entryCounter = 0
+        self.PLA_driverExit_last = self.PLA_driverExit
 
-      if not hca_enabled:
-        self.hca_frame_timer_running = 0
+      apply_angle = apply_std_steer_angle_limits(actuators.steeringAngleDeg, self.apply_angle_last, CS.out.vEgo, CarControllerParams) \
+        if CC.latActive and self.PLA_status == 6 else self.CSsteeringAngleDegLast
 
-      self.eps_timer_soft_disable_alert = self.hca_frame_timer_running > self.CCP.STEER_TIME_ALERT / DT_CTRL
-      self.apply_steer_last = apply_steer
-      can_sends.append(self.CCS.create_steering_control(self.packer_pt, CANBUS.pt, apply_steer, hca_enabled))
+      self.apply_angle_last = apply_angle
+      self.CSsteeringAngleDegLast = CS.out.steeringAngleDeg
+      can_sends.append(self.CCS.create_steering_control(self.packer_pt, CANBUS.br, apply_angle, self.PLA_status, self.PLA_ESP_status, self.CSLH3_SignLast))
+      self.CSLH3_SignLast = CS.LH_3_Sign
 
       if self.CP.flags & VolkswagenFlags.STOCK_HCA_PRESENT:
         # Pacify VW Emergency Assist driver inactivity detection by changing its view of driver steering input torque
@@ -98,7 +104,7 @@ class CarController(CarControllerBase):
       hud_alert = 0
       if hud_control.visualAlert in (VisualAlert.steerRequired, VisualAlert.ldw):
         hud_alert = self.CCP.LDW_MESSAGES["laneAssistTakeOver"]
-      can_sends.append(self.CCS.create_lka_hud_control(self.packer_pt, CANBUS.pt, CS.ldw_stock_values, CC.latActive,
+      can_sends.append(self.CCS.create_lka_hud_control(self.packer_pt, CANBUS.pt, CS.ldw_stock_values, (CC.latActive and CS.LH2_steeringState == 64),
                                                        CS.out.steeringPressed, hud_alert, hud_control))
 
     if self.frame % self.CCP.ACC_HUD_STEP == 0 and self.CP.openpilotLongitudinalControl:
@@ -119,8 +125,8 @@ class CarController(CarControllerBase):
                                                            cancel=CC.cruiseControl.cancel, resume=CC.cruiseControl.resume))
 
     new_actuators = actuators.copy()
-    new_actuators.steer = self.apply_steer_last / self.CCP.STEER_MAX
-    new_actuators.steerOutputCan = self.apply_steer_last
+    new_actuators.steeringAngleDeg = self.apply_angle_last
+    self.eps_timer_soft_disable_alert = False
 
     self.gra_acc_counter_last = CS.gra_stock_values["COUNTER"]
     self.frame += 1
