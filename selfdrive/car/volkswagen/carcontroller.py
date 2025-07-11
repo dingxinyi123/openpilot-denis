@@ -32,8 +32,12 @@ class CarController(CarControllerBase):
 
     self.apply_steer_last = 0
     self.gra_acc_counter_last = None
+    self.frame = 0
+    self.eps_timer_workaround = True  # For testing, replace with CP.carFingerprint in (PQ_CARS, MLB_CARS)
     self.eps_timer_soft_disable_alert = False
     self.hca_frame_timer_running = 0
+    self.hca_frame_timer_resetting = 0
+    self.hca_frame_low_torque = 0
     self.hca_frame_same_torque = 0
     self.last_button_frame = 0
 
@@ -85,6 +89,7 @@ class CarController(CarControllerBase):
     actuators = CC.actuators
     hud_control = CC.hudControl
     can_sends = []
+    output_steer = 0
 
     if not self.CP.pcmCruiseSpeed:
       if not self.last_speed_limit_sign_tap_prev and CS.params_list.last_speed_limit_sign_tap:
@@ -111,7 +116,7 @@ class CarController(CarControllerBase):
       # MQB racks reset the uninterrupted steering timer after a single frame
       # of HCA disabled; this is done whenever output happens to be zero.
 
-      if CC.latActive:
+            if CC.latActive:
         new_steer = int(round(actuators.steer * self.CCP.STEER_MAX))
         apply_steer = apply_driver_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorque, self.CCP)
         self.hca_frame_timer_running += self.CCP.STEER_STEP
@@ -123,16 +128,33 @@ class CarController(CarControllerBase):
         else:
           self.hca_frame_same_torque = 0
         hca_enabled = abs(apply_steer) > 0
+        if self.eps_timer_workaround and self.hca_frame_timer_running >= self.CCP.STEER_TIME_BM / DT_CTRL:
+          if abs(apply_steer) <= self.CCP.STEER_LOW_TORQUE:
+            self.hca_frame_low_torque += self.CCP.STEER_STEP
+            if self.hca_frame_low_torque >= self.CCP.STEER_TIME_LOW_TORQUE / DT_CTRL:
+              hca_enabled = False
+          else:
+            self.hca_frame_low_torque = 0
+            if self.hca_frame_timer_resetting > 0:
+              apply_steer = 0
       else:
+        self.hca_frame_low_torque = 0
         hca_enabled = False
         apply_steer = 0
 
-      if not hca_enabled:
-        self.hca_frame_timer_running = 0
+      if hca_enabled:
+        output_steer = apply_steer
+        self.hca_frame_timer_resetting = 0
+      else:
+        output_steer = 0
+        self.hca_frame_timer_resetting += self.CCP.STEER_STEP
+        if self.hca_frame_timer_resetting >= 1.1 / DT_CTRL or not self.eps_timer_workaround:
+          self.hca_frame_timer_running = 0
+          apply_steer = 0
 
       self.eps_timer_soft_disable_alert = self.hca_frame_timer_running > self.CCP.STEER_TIME_ALERT / DT_CTRL
       self.apply_steer_last = apply_steer
-      can_sends.append(self.CCS.create_steering_control(self.packer_pt, CANBUS.pt, apply_steer, hca_enabled))
+      can_sends.append(self.CCS.create_steering_control(self.packer_pt, CANBUS.pt, output_steer, hca_enabled))
 
       if self.CP.flags & VolkswagenFlags.STOCK_HCA_PRESENT:
         # Pacify VW Emergency Assist driver inactivity detection by changing its view of driver steering input torque
@@ -201,7 +223,7 @@ class CarController(CarControllerBase):
         self.last_cruise_button = self.cruise_button
 
     new_actuators = actuators.as_builder()
-    new_actuators.steer = self.apply_steer_last / self.CCP.STEER_MAX
+    new_actuators.steer = output_steer / self.CCP.STEER_MAX
     new_actuators.steerOutputCan = self.apply_steer_last
 
     self.gra_acc_counter_last = CS.gra_stock_values["COUNTER"]
