@@ -221,24 +221,64 @@ def hardware_thread(end_event, hw_queue) -> None:
       offroad_cycle_count = sm.frame
     onroad_conditions["not_onroad_cycle"] = (sm.frame - offroad_cycle_count) >= ONROAD_CYCLE_TIME * SERVICE_LIST['pandaStates'].frequency
 
+    # if sm.updated['pandaStates'] and len(pandaStates) > 0:
+
+    #   # Set ignition based on any panda connected
+    #   onroad_conditions["ignition"] = any(ps.ignitionLine or ps.ignitionCan for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown)
+
+    #   pandaState = pandaStates[0]
+
+    #   in_car = pandaState.harnessStatus != log.PandaState.HarnessStatus.notConnected
+
+    #   # Setup fan handler on first connect to panda
+    #   if fan_controller is None and peripheral_panda_present:
+    #     if TICI:
+    #       fan_controller = TiciFanController()
+
+    # elif (time.monotonic() - sm.recv_time['pandaStates']) > DISCONNECT_TIMEOUT:
+    #   if onroad_conditions["ignition"]:
+    #     onroad_conditions["ignition"] = False
+    #     cloudlog.error("panda timed out onroad")
+
+    # === 调试版开始 ===
     if sm.updated['pandaStates'] and len(pandaStates) > 0:
+      # 正常运行阶段：每 1 秒在终端打印一次状态，确认数据流还活着
+      if sm.frame % round(SERVICE_LIST['pandaStates'].frequency) == 0:
+          delta = time.monotonic() - sm.recv_time['pandaStates']
+          print(f"DEBUG: Panda Active | Msg-Gap: {delta:.3f}s | Ign: {onroad_conditions['ignition']}")
 
-      # Set ignition based on any panda connected
+      # 原有点火逻辑
       onroad_conditions["ignition"] = any(ps.ignitionLine or ps.ignitionCan for ps in pandaStates if ps.pandaType != log.PandaState.PandaType.unknown)
-
       pandaState = pandaStates[0]
-
       in_car = pandaState.harnessStatus != log.PandaState.HarnessStatus.notConnected
 
-      # Setup fan handler on first connect to panda
       if fan_controller is None and peripheral_panda_present:
         if TICI:
           fan_controller = TiciFanController()
 
     elif (time.monotonic() - sm.recv_time['pandaStates']) > DISCONNECT_TIMEOUT:
+      # !!! 关键时刻：捕获超时瞬间的案发现场 !!!
+      current_t = time.monotonic()
+      last_msg_t = sm.recv_time['pandaStates']
+      gap = current_t - last_msg_t
+
+      print("\n" + "!"*50)
+      print("CRITICAL: PANDA TIMEOUT TRIGGERED!")
+      print(f"Current System Time: {current_t:.3f}")
+      print(f"Last Panda Message:  {last_msg_t:.3f}")
+      print(f"Time Gap (Seconds):  {gap:.3f}")
+      print(f"Panda Timeout Limit: {DISCONNECT_TIMEOUT}")
+      print(f"Ignition at Death:   {onroad_conditions['ignition']}")
+
+      # 额外检查：看看到底是硬件掉了还是进程挂了
+      boardd_alive = any("boardd" in p.name() for p in psutil.process_iter(attrs=['name']))
+      print(f"Is boardd process running? {boardd_alive}")
+      print("!"*50 + "\n")
+
       if onroad_conditions["ignition"]:
         onroad_conditions["ignition"] = False
         cloudlog.error("panda timed out onroad")
+    # === 调试版结束 ===
 
     # Run at 2Hz, plus either edge of ignition
     ign_edge = (started_ts is not None) != all(onroad_conditions.values())

@@ -18,3 +18,5 @@ if [ "$MODEL" = "comma tici" ]; then
 fi
 
 exec ./launch_chffrplus.sh
+
+#export QT_SCALE_FACTOR=0.75
