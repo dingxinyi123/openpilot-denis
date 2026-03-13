@@ -107,7 +107,8 @@ class Controls(ControlsExt, ModelStateBase):
     CC = car.CarControl.new_message()
     CC.enabled = self.sm['selfdriveState'].enabled
 
-    # Check which actuators can be enabled
+    standstill = abs(CS.vEgo) <= max(self.CP.minSteerSpeed, 0.3) or CS.standstill
+    print(f"[CTRL2] vEgo={CS.vEgo:.3f} minSteer={self.CP.minSteerSpeed:.3f} cs_standstill={CS.standstill} result={standstill}")
     standstill = abs(CS.vEgo) <= max(self.CP.minSteerSpeed, 0.3) or CS.standstill
 
     # Get which state to use for active lateral control
@@ -115,6 +116,11 @@ class Controls(ControlsExt, ModelStateBase):
 
     CC.latActive = _lat_active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
                    (not standstill or self.CP.steerAtStandstill)
+    print(f"[CTRL] latActive={CC.latActive} standstill={standstill} fault_t={CS.steerFaultTemporary} fault_p={CS.steerFaultPermanent}")
+    # === 无ACC车型：强制启用横向，绕过selfdriveState.enabled依赖 ===
+    CC.latActive = not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
+               (not standstill or self.CP.steerAtStandstill)
+    print(f"[CTRL] latActive={CC.latActive} standstill={standstill} fault_t={CS.steerFaultTemporary} fault_p={CS.steerFaultPermanent}")
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and \
                     (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed)
 
@@ -170,6 +176,7 @@ class Controls(ControlsExt, ModelStateBase):
 
     CC.cruiseControl.override = CC.enabled and not CC.longActive and (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed)
     CC.cruiseControl.cancel = CS.cruiseState.enabled and (not CC.enabled or not self.CP.pcmCruise)
+    CC.cruiseControl.cancel = False  # 无ACC车型：禁止发cancel，防止干扰EPS
     CC.cruiseControl.resume = CC.enabled and CS.cruiseState.standstill and not self.sm['longitudinalPlan'].shouldStop
 
     hudControl = CC.hudControl
